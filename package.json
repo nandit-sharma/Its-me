@@ -1,0 +1,38 @@
+{
+  "name": "telegram-auto-reply-bot",
+  "version": "1.0.0",
+  "description": "A Telegram bot that auto-replies to messages based on configurable rules and integrates with WhatsApp",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "pm2:start": "pm2 start index.js --name telegram-bot",
+    "pm2:stop": "pm2 stop telegram-bot",
+    "pm2:restart": "pm2 restart telegram-bot",
+    "pm2:logs": "pm2 logs telegram-bot"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "auto-reply",
+    "whatsapp",
+    "nodejs",
+    "automation"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {
+    "node-schedule": "^2.1.1",
+    "node-telegram-bot-api": "^0.66.0",
+    "punycode": "^2.3.1",
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.33.2"
+  },
+  "devDependencies": {
+    "pm2": "^5.3.0"
+  }
+}
