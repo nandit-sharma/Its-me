@@ -1,15 +1,26 @@
 const fs = require('fs');
 const path = require('path');
+const express = require('express');
+const sqlite3 = require('sqlite3').verbose();
 const TelegramBot = require('node-telegram-bot-api');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 
-// Telegram bot token - Consider using environment variable for security
-const token = process.env.TELEGRAM_BOT_TOKEN || "8377750008:AAFLWgl2JGVpzBhLChKQe-LfRDwQmNgnOp4";
+// Telegram bot token - MUST be set via environment variable for security
+const token = process.env.TELEGRAM_BOT_TOKEN;
+if (!token) {
+  throw new Error("❌ TELEGRAM_BOT_TOKEN is missing in environment variables.");
+}
 const bot = new TelegramBot(token, { polling: true });
 
 // Admin chat IDs (users who can manage rules)
 const ADMIN_CHAT_IDS = process.env.ADMIN_CHAT_IDS ? process.env.ADMIN_CHAT_IDS.split(',').map(id => parseInt(id)) : [];
+
+// Express server for Railway keep-alive
+const app = express();
+const PORT = process.env.PORT || 3000;
+app.get("/", (req, res) => res.send("Bot is running ✅"));
+app.listen(PORT, () => console.log(`🌍 Server running on port ${PORT}`));
 
 // WhatsApp client setup
 const client = new Client({
@@ -46,41 +57,75 @@ client.initialize().catch(err => {
     console.error('❌ Failed to initialize WhatsApp client:', err);
 });
 
-// --- RULES FILE ---
-const RULES_FILE = path.join(__dirname, 'rules.json');
+// --- SQLITE DATABASE SETUP ---
+const DB_FILE = path.join(__dirname, 'rules.db');
+const db = new sqlite3.Database(DB_FILE);
+
+// Initialize database tables
+db.serialize(() => {
+    db.run(`CREATE TABLE IF NOT EXISTS rules (
+        trigger TEXT PRIMARY KEY,
+        reply TEXT
+    )`);
+    console.log("✅ SQLite database initialized");
+});
 
 // --- AUTHORIZED NUMBERS FILE ---
 const AUTHORIZED_NUMBERS_FILE = path.join(__dirname, 'authorized_numbers.json');
 
-// --- Load Rules ---
-let rules = {};
-
 // --- Load Authorized Numbers ---
 let authorizedNumbers = [];
-function loadRules() {
-    if (fs.existsSync(RULES_FILE)) {
-        try {
-            const data = fs.readFileSync(RULES_FILE, 'utf8');
-            rules = data.trim() ? JSON.parse(data) : {};
-            console.log("✅ Rules loaded:", Object.keys(rules).length, "rules found");
-        } catch (err) {
-            console.error("⚠️ Error reading rules.json:", err);
-            rules = {};
+
+// Database helper functions
+function loadRulesFromDB(callback) {
+    db.all("SELECT * FROM rules", (err, rows) => {
+        if (err) {
+            console.error("⚠️ Error loading rules from database:", err);
+            callback({});
+            return;
         }
-    } else {
-        rules = {};
-        fs.writeFileSync(RULES_FILE, JSON.stringify(rules, null, 2));
-        console.log("🆕 rules.json created");
-    }
+        const rules = {};
+        rows.forEach(row => {
+            rules[row.trigger] = row.reply;
+        });
+        console.log("✅ Rules loaded from database:", rows.length, "rules found");
+        callback(rules);
+    });
 }
 
-function saveRules() {
-    try {
-        fs.writeFileSync(RULES_FILE, JSON.stringify(rules, null, 2));
-        console.log("💾 Rules saved:", Object.keys(rules).length, "rules total");
-    } catch (err) {
-        console.error("⚠️ Error saving rules.json:", err);
-    }
+function saveRuleToDB(trigger, reply, callback) {
+    db.run("INSERT OR REPLACE INTO rules (trigger, reply) VALUES (?, ?)", [trigger, reply], function(err) {
+        if (err) {
+            console.error("⚠️ Error saving rule to database:", err);
+            callback(false);
+            return;
+        }
+        console.log("💾 Rule saved to database:", trigger, "→", reply);
+        callback(true);
+    });
+}
+
+function deleteRuleFromDB(trigger, callback) {
+    db.run("DELETE FROM rules WHERE trigger = ?", [trigger], function(err) {
+        if (err) {
+            console.error("⚠️ Error deleting rule from database:", err);
+            callback(false);
+            return;
+        }
+        console.log("🗑️ Rule deleted from database:", trigger);
+        callback(this.changes > 0);
+    });
+}
+
+function getRuleFromDB(trigger, callback) {
+    db.get("SELECT reply FROM rules WHERE trigger = ?", [trigger], (err, row) => {
+        if (err) {
+            console.error("⚠️ Error getting rule from database:", err);
+            callback(null);
+            return;
+        }
+        callback(row ? row.reply : null);
+    });
 }
 
 function loadAuthorizedNumbers() {
@@ -121,8 +166,7 @@ function isAdmin(chatId) {
     return ADMIN_CHAT_IDS.length === 0 || ADMIN_CHAT_IDS.includes(chatId);
 }
 
-// --- Load rules and authorized numbers at startup ---
-loadRules();
+// --- Load authorized numbers at startup ---
 loadAuthorizedNumbers();
 
 // --- SEND COMMAND ---
@@ -196,17 +240,19 @@ bot.onText(/\/listrules/, (msg) => {
         return;
     }
     
-    if (Object.keys(rules).length === 0) {
-        bot.sendMessage(chatId, "📭 No rules saved yet.");
-    } else {
-        let text = "📜 Saved Rules:\n\n";
-        let count = 1;
-        for (const [trigger, reply] of Object.entries(rules)) {
-            text += `${count}. "${trigger}" → "${reply}"\n`;
-            count++;
+    loadRulesFromDB((rules) => {
+        if (Object.keys(rules).length === 0) {
+            bot.sendMessage(chatId, "📭 No rules saved yet.");
+        } else {
+            let text = "📜 Saved Rules:\n\n";
+            let count = 1;
+            for (const [trigger, reply] of Object.entries(rules)) {
+                text += `${count}. "${trigger}" → "${reply}"\n`;
+                count++;
+            }
+            bot.sendMessage(chatId, text);
         }
-        bot.sendMessage(chatId, text);
-    }
+    });
 });
 
 // Add rule
@@ -220,9 +266,13 @@ bot.onText(/\/addrule\s*"([^"]+)"\s*"([^"]+)"/, (msg, match) => {
     const trigger = match[1].toLowerCase();
     const reply = match[2];
 
-    rules[trigger] = reply;
-    saveRules();
-    bot.sendMessage(chatId, `✅ Rule added:\nTrigger: "${trigger}"\nReply: "${reply}"\n\nThis rule will now auto-reply to messages containing "${trigger}"`);
+    saveRuleToDB(trigger, reply, (success) => {
+        if (success) {
+            bot.sendMessage(chatId, `✅ Rule added:\nTrigger: "${trigger}"\nReply: "${reply}"\n\nThis rule will now auto-reply to messages containing "${trigger}"`);
+        } else {
+            bot.sendMessage(chatId, "❌ Failed to save rule to database.");
+        }
+    });
 });
 
 // Delete rule
@@ -235,13 +285,13 @@ bot.onText(/\/deleterule\s*"([^"]+)"/, (msg, match) => {
     
     const trigger = match[1].toLowerCase();
 
-    if (Object.prototype.hasOwnProperty.call(rules, trigger)) {
-        delete rules[trigger];
-        saveRules();
-        bot.sendMessage(chatId, `🗑️ Rule "${trigger}" deleted successfully.`);
-    } else {
-        bot.sendMessage(chatId, `⚠️ Rule "${trigger}" not found.`);
-    }
+    deleteRuleFromDB(trigger, (success) => {
+        if (success) {
+            bot.sendMessage(chatId, `🗑️ Rule "${trigger}" deleted successfully.`);
+        } else {
+            bot.sendMessage(chatId, `⚠️ Rule "${trigger}" not found.`);
+        }
+    });
 });
 
 // Edit rule
@@ -255,14 +305,19 @@ bot.onText(/\/editrule\s*"([^"]+)"\s*"([^"]+)"/, (msg, match) => {
     const trigger = match[1].toLowerCase();
     const newReply = match[2];
 
-    if (Object.prototype.hasOwnProperty.call(rules, trigger)) {
-        const oldReply = rules[trigger];
-        rules[trigger] = newReply;
-        saveRules();
-        bot.sendMessage(chatId, `✏️ Rule updated:\nTrigger: "${trigger}"\nOld reply: "${oldReply}"\nNew reply: "${newReply}"`);
-    } else {
-        bot.sendMessage(chatId, `⚠️ Rule "${trigger}" not found. Use /addrule to create a new rule.`);
-    }
+    getRuleFromDB(trigger, (oldReply) => {
+        if (oldReply) {
+            saveRuleToDB(trigger, newReply, (success) => {
+                if (success) {
+                    bot.sendMessage(chatId, `✏️ Rule updated:\nTrigger: "${trigger}"\nOld reply: "${oldReply}"\nNew reply: "${newReply}"`);
+                } else {
+                    bot.sendMessage(chatId, "❌ Failed to update rule in database.");
+                }
+            });
+        } else {
+            bot.sendMessage(chatId, `⚠️ Rule "${trigger}" not found. Use /addrule to create a new rule.`);
+        }
+    });
 });
 
 // --- AUTHORIZED NUMBERS MANAGEMENT COMMANDS ---
@@ -393,23 +448,26 @@ client.on('message', async (msg) => {
     const body = msg.body.toLowerCase();
     console.log(`📥 WhatsApp message received: "${msg.body}" from authorized number ${msg.from}`);
     
-    for (const trigger in rules) {
-        if (body.includes(trigger.toLowerCase())) {
-            console.log(`⏳ Waiting 30 seconds before replying to appear more human...`);
-            
-            // Add 30-second delay to make replies appear more natural
-            setTimeout(async () => {
-                try {
-                    await client.sendMessage(msg.from, rules[trigger]);
-                    console.log(`📤 WhatsApp auto-replied with rule "${trigger}" → "${rules[trigger]}" (after 30s delay)`);
-                } catch (err) {
-                    console.error('⚠️ Error sending delayed WhatsApp reply:', err);
-                }
-            }, 30000); // 30 seconds = 30000 milliseconds
-            
-            break; // Reply only to the first matching rule
+    // Load rules from database and check for matches
+    loadRulesFromDB((rules) => {
+        for (const trigger in rules) {
+            if (body.includes(trigger.toLowerCase())) {
+                console.log(`⏳ Waiting 30 seconds before replying to appear more human...`);
+                
+                // Add 30-second delay to make replies appear more natural
+                setTimeout(async () => {
+                    try {
+                        await client.sendMessage(msg.from, rules[trigger]);
+                        console.log(`📤 WhatsApp auto-replied with rule "${trigger}" → "${rules[trigger]}" (after 30s delay)`);
+                    } catch (err) {
+                        console.error('⚠️ Error sending delayed WhatsApp reply:', err);
+                    }
+                }, 30000); // 30 seconds = 30000 milliseconds
+                
+                break; // Reply only to the first matching rule
+            }
         }
-    }
+    });
 });
 
 
