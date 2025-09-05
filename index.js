@@ -49,8 +49,14 @@ client.initialize().catch(err => {
 // --- RULES FILE ---
 const RULES_FILE = path.join(__dirname, 'rules.json');
 
+// --- AUTHORIZED NUMBERS FILE ---
+const AUTHORIZED_NUMBERS_FILE = path.join(__dirname, 'authorized_numbers.json');
+
 // --- Load Rules ---
 let rules = {};
+
+// --- Load Authorized Numbers ---
+let authorizedNumbers = [];
 function loadRules() {
     if (fs.existsSync(RULES_FILE)) {
         try {
@@ -77,13 +83,47 @@ function saveRules() {
     }
 }
 
+function loadAuthorizedNumbers() {
+    if (fs.existsSync(AUTHORIZED_NUMBERS_FILE)) {
+        try {
+            const data = fs.readFileSync(AUTHORIZED_NUMBERS_FILE, 'utf8');
+            authorizedNumbers = data.trim() ? JSON.parse(data) : [];
+            console.log("✅ Authorized numbers loaded:", authorizedNumbers.length, "numbers found");
+        } catch (err) {
+            console.error("⚠️ Error reading authorized_numbers.json:", err);
+            authorizedNumbers = [];
+        }
+    } else {
+        authorizedNumbers = [];
+        fs.writeFileSync(AUTHORIZED_NUMBERS_FILE, JSON.stringify(authorizedNumbers, null, 2));
+        console.log("🆕 authorized_numbers.json created");
+    }
+}
+
+function saveAuthorizedNumbers() {
+    try {
+        fs.writeFileSync(AUTHORIZED_NUMBERS_FILE, JSON.stringify(authorizedNumbers, null, 2));
+        console.log("💾 Authorized numbers saved:", authorizedNumbers.length, "numbers total");
+    } catch (err) {
+        console.error("⚠️ Error saving authorized_numbers.json:", err);
+    }
+}
+
+// Function to check if a number is authorized
+function isAuthorizedNumber(phoneNumber) {
+    // Extract number from WhatsApp format (e.g., "919876543210@c.us" -> "919876543210")
+    const cleanNumber = phoneNumber.replace('@c.us', '').replace('@g.us', '');
+    return authorizedNumbers.includes(cleanNumber);
+}
+
 // Function to check if user is admin
 function isAdmin(chatId) {
     return ADMIN_CHAT_IDS.length === 0 || ADMIN_CHAT_IDS.includes(chatId);
 }
 
-// --- Load rules at startup ---
+// --- Load rules and authorized numbers at startup ---
 loadRules();
+loadAuthorizedNumbers();
 
 // --- SEND COMMAND ---
 // Format: /send <number> "message"
@@ -225,17 +265,93 @@ bot.onText(/\/editrule\s*"([^"]+)"\s*"([^"]+)"/, (msg, match) => {
     }
 });
 
+// --- AUTHORIZED NUMBERS MANAGEMENT COMMANDS ---
+// Add authorized number
+bot.onText(/\/addnumber\s+(\d+)/, (msg, match) => {
+    const chatId = msg.chat.id;
+    if (!isAdmin(chatId)) {
+        bot.sendMessage(chatId, "❌ You don't have permission to manage authorized numbers.");
+        return;
+    }
+    
+    let number = match[1];
+    
+    // Add +91 if number doesn't start with country code
+    if (!number.startsWith('+')) {
+        number = number.startsWith('0') ? number.substring(1) : number;
+        number = `91${number}`;
+    }
+    
+    if (authorizedNumbers.includes(number)) {
+        bot.sendMessage(chatId, `⚠️ Number +${number} is already authorized.`);
+    } else {
+        authorizedNumbers.push(number);
+        saveAuthorizedNumbers();
+        bot.sendMessage(chatId, `✅ Number +${number} added to authorized list.\n\nThis number can now receive auto-replies from the bot.`);
+    }
+});
+
+// List authorized numbers
+bot.onText(/\/listnumbers/, (msg) => {
+    const chatId = msg.chat.id;
+    if (!isAdmin(chatId)) {
+        bot.sendMessage(chatId, "❌ You don't have permission to view authorized numbers.");
+        return;
+    }
+    
+    if (authorizedNumbers.length === 0) {
+        bot.sendMessage(chatId, "📭 No authorized numbers saved yet.\n\nUse /addnumber <number> to add numbers that can receive auto-replies.");
+    } else {
+        let text = "📱 Authorized Numbers:\n\n";
+        authorizedNumbers.forEach((number, index) => {
+            text += `${index + 1}. +${number}\n`;
+        });
+        text += `\n📊 Total: ${authorizedNumbers.length} numbers`;
+        bot.sendMessage(chatId, text);
+    }
+});
+
+// Remove authorized number
+bot.onText(/\/removenumber\s+(\d+)/, (msg, match) => {
+    const chatId = msg.chat.id;
+    if (!isAdmin(chatId)) {
+        bot.sendMessage(chatId, "❌ You don't have permission to manage authorized numbers.");
+        return;
+    }
+    
+    let number = match[1];
+    
+    // Add +91 if number doesn't start with country code
+    if (!number.startsWith('+')) {
+        number = number.startsWith('0') ? number.substring(1) : number;
+        number = `91${number}`;
+    }
+    
+    const index = authorizedNumbers.indexOf(number);
+    if (index > -1) {
+        authorizedNumbers.splice(index, 1);
+        saveAuthorizedNumbers();
+        bot.sendMessage(chatId, `🗑️ Number +${number} removed from authorized list.`);
+    } else {
+        bot.sendMessage(chatId, `⚠️ Number +${number} is not in the authorized list.`);
+    }
+});
+
 // Help command
 bot.onText(/\/help/, (msg) => {
     const chatId = msg.chat.id;
     const helpText = `🤖 **Telegram Auto-Reply Bot Commands**\n\n` +
         `**Message Auto-Reply:**\n` +
-        `• Bot automatically replies to messages based on saved rules\n\n` +
+        `• Bot automatically replies to messages from authorized numbers only\n\n` +
         `**Rule Management:**\n` +
         `• /listrules - List all saved rules\n` +
         `• /addrule "trigger" "reply" - Add new rule\n` +
         `• /editrule "trigger" "new_reply" - Edit existing rule\n` +
         `• /deleterule "trigger" - Delete rule\n\n` +
+        `**Authorized Numbers:**\n` +
+        `• /addnumber <number> - Add number to authorized list\n` +
+        `• /listnumbers - List all authorized numbers\n` +
+        `• /removenumber <number> - Remove number from authorized list\n\n` +
         `**WhatsApp Integration:**\n` +
         `• /send <number> "message" - Send message to WhatsApp\n\n` +
         `**Scheduled Messages:**\n` +
@@ -243,6 +359,7 @@ bot.onText(/\/help/, (msg) => {
         `• /listschedules - List all active schedules\n` +
         `• /cancelschedule <number> HH:MM - Cancel a schedule\n\n` +
         `**Examples:**\n` +
+        `• /addnumber 9876543210 - Allow this number to receive auto-replies\n` +
         `• /addrule "hello" "Hi there! How can I help you?"\n` +
         `• /send 9876543210 "Hello from Telegram!"\n` +
         `• /schedule 9876543210 "Good morning!" 08:00\n\n` +
@@ -267,13 +384,29 @@ client.on('message', async (msg) => {
     // Skip if message is from status broadcast or if it's from us
     if (msg.isStatus || msg.fromMe) return;
     
+    // Check if the sender is authorized
+    if (!isAuthorizedNumber(msg.from)) {
+        console.log(`🚫 Message from unauthorized number: ${msg.from} - "${msg.body}"`);
+        return;
+    }
+    
     const body = msg.body.toLowerCase();
-    console.log(`📥 WhatsApp message received: "${msg.body}" from ${msg.from}`);
+    console.log(`📥 WhatsApp message received: "${msg.body}" from authorized number ${msg.from}`);
     
     for (const trigger in rules) {
         if (body.includes(trigger.toLowerCase())) {
-            await msg.reply(rules[trigger]);
-            console.log(`📤 WhatsApp auto-replied with rule "${trigger}" → "${rules[trigger]}"`);
+            console.log(`⏳ Waiting 30 seconds before replying to appear more human...`);
+            
+            // Add 30-second delay to make replies appear more natural
+            setTimeout(async () => {
+                try {
+                    await client.sendMessage(msg.from, rules[trigger]);
+                    console.log(`📤 WhatsApp auto-replied with rule "${trigger}" → "${rules[trigger]}" (after 30s delay)`);
+                } catch (err) {
+                    console.error('⚠️ Error sending delayed WhatsApp reply:', err);
+                }
+            }, 30000); // 30 seconds = 30000 milliseconds
+            
             break; // Reply only to the first matching rule
         }
     }

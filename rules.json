@@ -2,5 +2,8 @@
   "hello": "Hi, how are you?",
   "urgent": "I'll reply ASAP",
   "han": "Han",
-  "where": "Here"
+  "where": "Here",
+  "good": "Good",
+  "what": "Nothing",
+  "fine": "Very good"
 }
