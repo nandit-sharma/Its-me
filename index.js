@@ -238,9 +238,14 @@ bot.onText(/\/help/, (msg) => {
         `• /deleterule "trigger" - Delete rule\n\n` +
         `**WhatsApp Integration:**\n` +
         `• /send <number> "message" - Send message to WhatsApp\n\n` +
+        `**Scheduled Messages:**\n` +
+        `• /schedule <number> "message" HH:MM - Schedule daily message\n` +
+        `• /listschedules - List all active schedules\n` +
+        `• /cancelschedule <number> HH:MM - Cancel a schedule\n\n` +
         `**Examples:**\n` +
         `• /addrule "hello" "Hi there! How can I help you?"\n` +
-        `• /send 9876543210 "Hello from Telegram!"\n\n` +
+        `• /send 9876543210 "Hello from Telegram!"\n` +
+        `• /schedule 9876543210 "Good morning!" 08:00\n\n` +
         `**Note:** Rules are case-insensitive and match partial text.`;
     
     bot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
@@ -273,3 +278,176 @@ client.on('message', async (msg) => {
         }
     }
 });
+
+
+// NEW WORk...
+
+// --- SCHEDULED MESSAGES ---
+// Requires: npm install node-cron
+const cron = require('node-cron');
+const SCHEDULE_FILE = path.join(__dirname, 'schedule.json');
+
+// --- Load Schedules ---
+let schedules = {};
+function loadSchedules() {
+    if (fs.existsSync(SCHEDULE_FILE)) {
+        try {
+            const data = fs.readFileSync(SCHEDULE_FILE, 'utf8');
+            schedules = data.trim() ? JSON.parse(data) : {};
+            console.log("✅ Schedules loaded:", Object.keys(schedules).length, "found");
+        } catch (err) {
+            console.error("⚠️ Error reading schedule.json:", err);
+            schedules = {};
+        }
+    } else {
+        schedules = {};
+        fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(schedules, null, 2));
+        console.log("🆕 schedule.json created");
+    }
+}
+
+function saveSchedules() {
+    try {
+        fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(schedules, null, 2));
+        console.log("💾 Schedules saved:", Object.keys(schedules).length, "total");
+    } catch (err) {
+        console.error("⚠️ Error saving schedule.json:", err);
+    }
+}
+
+// Store active cron jobs
+let scheduledJobs = {};
+
+// Initialize schedules at startup
+function initSchedules() {
+    console.log(`🔄 Initializing ${Object.keys(schedules).length} saved schedules...`);
+    let successCount = 0;
+    for (const id in schedules) {
+        try {
+            createSchedule(id, schedules[id]);
+            successCount++;
+        } catch (err) {
+            console.error(`⚠️ Failed to initialize schedule ${id}:`, err);
+        }
+    }
+    console.log(`✅ Successfully initialized ${successCount}/${Object.keys(schedules).length} schedules`);
+}
+
+// Helper: create cron job
+function createSchedule(id, { number, text, hour, minute }) {
+    const cronTime = `${minute} ${hour} * * *`;
+    try {
+        scheduledJobs[id] = cron.schedule(cronTime, async () => {
+            try {
+                if (!client.info) {
+                    console.log('❌ WhatsApp client not ready.');
+                    return;
+                }
+                const numberId = await client.getNumberId(number);
+                if (!numberId) {
+                    console.log(`❌ Number "${number}" is not registered on WhatsApp.`);
+                    return;
+                }
+                await client.sendMessage(numberId._serialized, text);
+                console.log(`📤 Scheduled message sent to +${number}: ${text}`);
+            } catch (err) {
+                console.error('⚠️ Error sending scheduled message:', err);
+            }
+        }, {
+            scheduled: false
+        });
+        
+        // Start the cron job
+        scheduledJobs[id].start();
+        console.log(`🕒 Schedule created for +${number} at ${hour}:${minute} (${cronTime})`);
+    } catch (err) {
+        console.error(`⚠️ Error creating schedule ${id}:`, err);
+    }
+}
+
+// --- Telegram Commands ---
+// /schedule <number> "message" HH:MM
+bot.onText(/^\/schedule\s+(\d+)\s+"([^"]+)"\s+(\d{2}):(\d{2})$/, (msg, match) => {
+    const chatId = msg.chat.id;
+    let number = match[1];
+    const text = match[2];
+    const hour = match[3];
+    const minute = match[4];
+
+    if (!number.startsWith('+')) {
+        number = number.startsWith('0') ? number.substring(1) : number;
+        number = `91${number}`; // default India code
+    }
+
+    // Unique ID per schedule (number + time)
+    const id = `${number}_${hour}:${minute}`;
+
+    // Remove old job if exists
+    if (scheduledJobs[id]) {
+        scheduledJobs[id].stop();
+        delete scheduledJobs[id];
+    }
+
+    // Save to schedules.json
+    schedules[id] = { number, text, hour, minute };
+    saveSchedules();
+
+    // Create new schedule
+    try {
+        createSchedule(id, schedules[id]);
+        bot.sendMessage(chatId, `✅ Scheduled daily message:\nTo: +${number}\nText: "${text}"\nTime: ${hour}:${minute}\n\n📅 This message will be sent every day at ${hour}:${minute}`);
+    } catch (err) {
+        console.error('Error creating schedule:', err);
+        bot.sendMessage(chatId, `⚠️ Failed to create schedule: ${err.message}`);
+    }
+});
+
+// /listschedules
+bot.onText(/\/listschedules/, (msg) => {
+    const chatId = msg.chat.id;
+    if (Object.keys(schedules).length === 0) {
+        bot.sendMessage(chatId, "📭 No schedules set.");
+    } else {
+        let text = "📅 Active Schedules:\n\n";
+        let count = 1;
+        for (const [id, sched] of Object.entries(schedules)) {
+            text += `${count}. +${sched.number} → "${sched.text}" at ${sched.hour}:${sched.minute}\n`;
+            count++;
+        }
+        bot.sendMessage(chatId, text);
+    }
+});
+
+// /cancelschedule <number> HH:MM
+bot.onText(/^\/cancelschedule\s+(\d+)\s+(\d{2}):(\d{2})$/, (msg, match) => {
+    const chatId = msg.chat.id;
+    let number = match[1];
+    const hour = match[2];
+    const minute = match[3];
+
+    if (!number.startsWith('+')) {
+        number = number.startsWith('0') ? number.substring(1) : number;
+        number = `91${number}`;
+    }
+
+    const id = `${number}_${hour}:${minute}`;
+
+    if (scheduledJobs[id]) {
+        scheduledJobs[id].stop();
+        scheduledJobs[id].destroy();
+        delete scheduledJobs[id];
+        console.log(`🛑 Stopped cron job for ${id}`);
+    }
+
+    if (schedules[id]) {
+        delete schedules[id];
+        saveSchedules();
+        bot.sendMessage(chatId, `🗑️ Schedule for +${number} at ${hour}:${minute} cancelled.`);
+    } else {
+        bot.sendMessage(chatId, `⚠️ No schedule found for +${number} at ${hour}:${minute}.`);
+    }
+});
+
+// Load schedules on startup
+loadSchedules();
+initSchedules();
