@@ -50,17 +50,11 @@ async function initializeWhatsAppClient() {
         return;
     }
     
-    // Ensure sessions directory exists
-    const sessionsPath = ensureSessionsDirectory();
-    
-    // Use LocalAuth for proper session persistence
-    const { LocalAuth } = require('whatsapp-web.js');
+    // Load existing session from database
+    const savedSession = await loadSessionFromDB();
     
     client = new Client({
-        authStrategy: new LocalAuth({
-            clientId: 'whatsapp-bot',
-            dataPath: sessionsPath
-        }),
+        session: savedSession, // Use database session instead of LocalAuth
         puppeteer: {
             headless: true,
             args: [
@@ -121,24 +115,30 @@ async function initializeWhatsAppClient() {
         isClientInitialized = true;
     });
 
-    client.on('authenticated', () => {
+    client.on('authenticated', async (session) => {
         console.log('✅ WhatsApp authenticated');
-        console.log('💾 Session is being managed by LocalAuth');
+        console.log('💾 Saving session to database...');
         
         qrShown = false;
         reconnectAttempts = 0; // Reset on successful auth
         
-        // LocalAuth handles session persistence automatically
-        console.log('✅ WhatsApp session will be saved automatically by LocalAuth');
+        // Save session to database for persistence
+        const saved = await saveSessionToDB(session);
+        if (saved) {
+            console.log('✅ WhatsApp session saved to database successfully');
+        } else {
+            console.log('⚠️ Failed to save session to database');
+        }
     });
 
-    client.on('auth_failure', (msg) => {
+    client.on('auth_failure', async (msg) => {
         console.error('❌ WhatsApp authentication failed:', msg);
         qrShown = false;
         isClientInitialized = false;
         
-        // LocalAuth will handle clearing corrupted sessions
-        console.log('🗑️ LocalAuth will clear corrupted session automatically');
+        // Clear corrupted session from database
+        console.log('🗑️ Clearing corrupted session from database...');
+        await clearSessionFromDB();
         
         // Retry initialization after a delay
         setTimeout(() => {
@@ -155,7 +155,7 @@ async function initializeWhatsAppClient() {
         // Clear session on logout or session expiry
         if (reason === 'LOGOUT' || reason === 'NAVIGATION') {
             console.log('🗑️ Clearing session due to logout/navigation');
-            clearSessionFromDB();
+            await clearSessionFromDB();
         }
         
         // Always attempt to reconnect
@@ -455,25 +455,78 @@ function removeAuthorizedNumberFromDb(number) {
 }
 
 // --- WHATSAPP SESSION MANAGEMENT ---
-// Note: Session persistence is now handled by LocalAuth automatically
-// These functions are kept for potential future use or migration purposes
+// SQLite-based session storage for persistent WhatsApp authentication
 
-// Save WhatsApp session to database (Legacy - not used with LocalAuth)
+// Save WhatsApp session to database
 function saveSessionToDB(session) {
-    console.log('ℹ️ Session persistence is handled by LocalAuth - database save not needed');
-}
-
-// Load WhatsApp session from database (Legacy - not used with LocalAuth)
-function loadSessionFromDB() {
     return new Promise((resolve) => {
-        console.log('ℹ️ Session loading is handled by LocalAuth - returning null');
-        resolve(null);
+        if (!session) {
+            console.log('⚠️ No session data to save');
+            resolve(false);
+            return;
+        }
+        
+        const sessionString = JSON.stringify(session);
+        db.run('DELETE FROM whatsapp_session', (err) => {
+            if (err) {
+                console.error('⚠️ Error clearing old session:', err);
+                resolve(false);
+                return;
+            }
+            
+            db.run('INSERT INTO whatsapp_session (session_data) VALUES (?)', [sessionString], function(err) {
+                if (err) {
+                    console.error('⚠️ Error saving session to database:', err);
+                    resolve(false);
+                    return;
+                }
+                console.log('💾 WhatsApp session saved to database successfully');
+                resolve(true);
+            });
+        });
     });
 }
 
-// Clear WhatsApp session from database (Legacy - not used with LocalAuth)
+// Load WhatsApp session from database
+function loadSessionFromDB() {
+    return new Promise((resolve) => {
+        db.get('SELECT session_data FROM whatsapp_session ORDER BY created_at DESC LIMIT 1', (err, row) => {
+            if (err) {
+                console.error('⚠️ Error loading session from database:', err);
+                resolve(null);
+                return;
+            }
+            
+            if (row && row.session_data) {
+                try {
+                    const session = JSON.parse(row.session_data);
+                    console.log('✅ WhatsApp session loaded from database');
+                    resolve(session);
+                } catch (parseErr) {
+                    console.error('⚠️ Error parsing session data:', parseErr);
+                    resolve(null);
+                }
+            } else {
+                console.log('ℹ️ No session found in database');
+                resolve(null);
+            }
+        });
+    });
+}
+
+// Clear WhatsApp session from database
 function clearSessionFromDB() {
-    console.log('ℹ️ Session clearing is handled by LocalAuth automatically');
+    return new Promise((resolve) => {
+        db.run('DELETE FROM whatsapp_session', function(err) {
+            if (err) {
+                console.error('⚠️ Error clearing session from database:', err);
+                resolve(false);
+                return;
+            }
+            console.log('🗑️ WhatsApp session cleared from database');
+            resolve(true);
+        });
+    });
 }
 
 // Database helper functions
