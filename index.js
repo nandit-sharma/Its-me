@@ -267,7 +267,10 @@ console.log('🌐 Environment:', process.env.NODE_ENV || 'development');
 console.log('📁 Sessions directory:', path.join(__dirname, 'sessions'));
 console.log('🤖 Starting WhatsApp bot with enhanced server compatibility...');
 
-initializeWhatsAppClient();
+// Wait for database initialization before starting WhatsApp client
+setTimeout(() => {
+    initializeWhatsAppClient();
+}, 2000); // 2 second delay to ensure database is ready
 
 // --- ENHANCED DATABASE SETUP WITH PERSISTENCE ---
 const DB_FILE = path.join(__dirname, 'sessions', 'rules.db');
@@ -452,11 +455,6 @@ function removeAuthorizedNumberFromDb(number) {
 // --- WHATSAPP SESSION DATABASE FUNCTIONS ---
 // Save WhatsApp session to database
 function saveSessionToDB(session) {
-    if (!isDatabaseReady) {
-        console.log('⚠️ Database not ready, cannot save session');
-        return;
-    }
-    
     const sessionStr = JSON.stringify(session);
     
     // Clear old sessions and insert new one
@@ -481,12 +479,6 @@ function saveSessionToDB(session) {
 // Load WhatsApp session from database
 function loadSessionFromDB() {
     return new Promise((resolve) => {
-        if (!isDatabaseReady) {
-            console.log('⚠️ Database not ready, cannot load session');
-            resolve(null);
-            return;
-        }
-        
         db.get('SELECT session_data FROM whatsapp_session ORDER BY id DESC LIMIT 1', [], (err, row) => {
             if (err) {
                 console.error('❌ Error loading WhatsApp session:', err);
@@ -515,11 +507,6 @@ function loadSessionFromDB() {
 
 // Clear WhatsApp session from database
 function clearSessionFromDB() {
-    if (!isDatabaseReady) {
-        console.log('⚠️ Database not ready, cannot clear session');
-        return;
-    }
-    
     db.run('DELETE FROM whatsapp_session', (err) => {
         if (err) {
             console.error('❌ Error clearing WhatsApp session:', err);
