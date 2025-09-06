@@ -26,17 +26,38 @@ app.listen(PORT, () => console.log(`🌍 Server running on port ${PORT}`));
 let client;
 let isClientInitialized = false;
 let qrShown = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+
+// Ensure data directory exists for persistent storage
+function ensureDataDirectory() {
+    const dataPath = process.env.NODE_ENV === 'production' ? '/data' : __dirname;
+    const authPath = path.join(dataPath, '.wwebjs_auth');
+    
+    if (!fs.existsSync(authPath)) {
+        try {
+            fs.mkdirSync(authPath, { recursive: true });
+            console.log('📁 Created WhatsApp auth directory:', authPath);
+        } catch (err) {
+            console.error('❌ Failed to create auth directory:', err);
+        }
+    }
+    return authPath;
+}
 
 function initializeWhatsAppClient() {
     if (isClientInitialized) {
         console.log('⚠️ WhatsApp client already initialized, skipping...');
         return;
     }
+    
+    // Ensure data directory exists
+    ensureDataDirectory();
 
     client = new Client({
         authStrategy: new LocalAuth({
             clientId: "whatsapp-bot-session",
-            dataPath: path.join(__dirname, '.wwebjs_auth'),
+            dataPath: process.env.NODE_ENV === 'production' ? '/data/.wwebjs_auth' : path.join(__dirname, '.wwebjs_auth'),
             backupSyncIntervalMs: 300000 // 5 minutes backup sync
         }),
         puppeteer: {
@@ -56,11 +77,15 @@ function initializeWhatsAppClient() {
                 '--disable-renderer-backgrounding'
             ]
         },
-        // Keep connection alive settings
+        // Enhanced session persistence settings
         webVersionCache: {
             type: 'remote',
             remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
-        }
+        },
+        // Additional options for better stability
+        restartOnAuthFail: true,
+        takeoverOnConflict: true,
+        takeoverTimeoutMs: 0
     });
 
     client.on('qr', (qr) => {
@@ -68,17 +93,21 @@ function initializeWhatsAppClient() {
             console.log('WhatsApp QR Code generated. Scan with your phone:');
             qrcode.generate(qr, { small: true });
             qrShown = true;
+            reconnectAttempts = 0; // Reset reconnect attempts on new QR
         }
     });
 
     client.on('ready', () => {
         console.log('✅ WhatsApp client is ready!');
         qrShown = false; // Reset for future sessions
+        reconnectAttempts = 0; // Reset reconnect attempts on successful connection
+        isClientInitialized = true;
     });
 
     client.on('authenticated', () => {
         console.log('✅ WhatsApp authenticated');
         qrShown = false;
+        reconnectAttempts = 0; // Reset on successful auth
     });
 
     client.on('auth_failure', (msg) => {
@@ -87,35 +116,61 @@ function initializeWhatsAppClient() {
         // Don't reinitialize immediately to prevent loops
     });
 
-    client.on('disconnected', (reason) => {
+    client.on('disconnected', async (reason) => {
         console.log('❌ WhatsApp client disconnected:', reason);
         qrShown = false;
         isClientInitialized = false;
         
-        // Don't reconnect on LOGOUT - user manually logged out
-        if (reason === 'LOGOUT') {
-            console.log('🚪 User logged out manually, not reconnecting automatically');
-            return;
+        // Always attempt to reconnect, even on LOGOUT (could be forced logout)
+        console.log('🔄 Attempting automatic reconnection...');
+        
+        // Destroy the current client instance
+        try {
+            await client.destroy();
+        } catch (err) {
+            console.log('⚠️ Error destroying client:', err.message);
         }
         
-        // Only reinitialize after a delay for other disconnect reasons
+        // Wait and reinitialize
         setTimeout(() => {
             if (!isClientInitialized) {
-                console.log('🔄 Attempting to reconnect WhatsApp client...');
+                console.log('🚀 Reinitializing WhatsApp client after disconnect...');
                 initializeWhatsAppClient();
             }
-        }, 15000); // 15 second delay to prevent rapid reconnects
+        }, 10000); // 10 second delay
     });
 
-    // Initialize the client
-    client.initialize().then(() => {
-        isClientInitialized = true;
-        console.log('🚀 WhatsApp client initialization started');
-    }).catch(err => {
-        console.error('❌ Failed to initialize WhatsApp client:', err);
-        isClientInitialized = false;
-        qrShown = false;
+    // Add additional event handlers for better session management
+    client.on('loading_screen', (percent, message) => {
+        console.log('⏳ WhatsApp loading:', percent, message);
     });
+    
+    client.on('change_state', (state) => {
+        console.log('🔄 WhatsApp state changed:', state);
+    });
+    
+    // Initialize the client with retry logic
+    const initializeWithRetry = async (retryCount = 0) => {
+        try {
+            await client.initialize();
+            isClientInitialized = true;
+            console.log('🚀 WhatsApp client initialization started');
+        } catch (err) {
+            console.error('❌ Failed to initialize WhatsApp client:', err);
+            isClientInitialized = false;
+            qrShown = false;
+            
+            // Retry up to 3 times
+            if (retryCount < 3) {
+                console.log(`🔄 Retrying initialization (${retryCount + 1}/3) in 5 seconds...`);
+                setTimeout(() => initializeWithRetry(retryCount + 1), 5000);
+            } else {
+                console.error('💥 Max retry attempts reached. Manual intervention required.');
+            }
+        }
+    };
+    
+    initializeWithRetry();
 }
 
 // Start WhatsApp client initialization
