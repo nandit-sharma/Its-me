@@ -22,12 +22,23 @@ const PORT = process.env.PORT || 3000;
 app.get("/", (req, res) => res.send("Bot is running ✅"));
 app.listen(PORT, () => console.log(`🌍 Server running on port ${PORT}`));
 
-// WhatsApp client setup
+// WhatsApp client setup with session persistence
 const client = new Client({
-    authStrategy: new LocalAuth(),
+    authStrategy: new LocalAuth({
+        clientId: "whatsapp-session",
+        dataPath: path.join(__dirname, '.wwebjs_auth')
+    }),
     puppeteer: {
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu'
+        ]
     }
 });
 
@@ -101,6 +112,8 @@ function saveRuleToDB(trigger, reply, callback) {
             return;
         }
         console.log("💾 Rule saved to database:", trigger, "→", reply);
+        // Update global rules object
+        rules[trigger] = reply;
         callback(true);
     });
 }
@@ -113,6 +126,8 @@ function deleteRuleFromDB(trigger, callback) {
             return;
         }
         console.log("🗑️ Rule deleted from database:", trigger);
+        // Update global rules object
+        delete rules[trigger];
         callback(this.changes > 0);
     });
 }
@@ -165,6 +180,14 @@ function isAuthorizedNumber(phoneNumber) {
 function isAdmin(chatId) {
     return ADMIN_CHAT_IDS.length === 0 || ADMIN_CHAT_IDS.includes(chatId);
 }
+
+// Initialize global rules object
+let rules = {};
+
+// Load rules at startup
+loadRulesFromDB((loadedRules) => {
+    rules = loadedRules;
+});
 
 // --- Load authorized numbers at startup ---
 loadAuthorizedNumbers();
@@ -452,17 +475,17 @@ client.on('message', async (msg) => {
     loadRulesFromDB((rules) => {
         for (const trigger in rules) {
             if (body.includes(trigger.toLowerCase())) {
-                console.log(`⏳ Waiting 30 seconds before replying to appear more human...`);
+                console.log(`⏳ Waiting 5 seconds before replying to appear more human...`);
                 
-                // Add 30-second delay to make replies appear more natural
+                // Add 5-second delay to make replies appear more natural
                 setTimeout(async () => {
                     try {
                         await client.sendMessage(msg.from, rules[trigger]);
-                        console.log(`📤 WhatsApp auto-replied with rule "${trigger}" → "${rules[trigger]}" (after 30s delay)`);
+                        console.log(`📤 WhatsApp auto-replied with rule "${trigger}" → "${rules[trigger]}" (after 5s delay)`);
                     } catch (err) {
                         console.error('⚠️ Error sending delayed WhatsApp reply:', err);
                     }
-                }, 30000); // 30 seconds = 30000 milliseconds
+                }, 5000); // 5 seconds = 5000 milliseconds
                 
                 break; // Reply only to the first matching rule
             }
