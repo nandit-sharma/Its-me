@@ -50,11 +50,17 @@ async function initializeWhatsAppClient() {
         return;
     }
     
-    // Load existing session from database
+    // Load existing session from file
     const savedSession = await loadSessionFromDB();
     
+    if (savedSession) {
+        console.log('🔄 Using saved session from file - no QR code needed');
+    } else {
+        console.log('📱 No saved session found - QR code will be generated');
+    }
+    
     client = new Client({
-        session: savedSession, // Use database session instead of LocalAuth
+        session: savedSession, // Use saved session or null for new QR
         puppeteer: {
             headless: true,
             args: [
@@ -88,12 +94,12 @@ async function initializeWhatsAppClient() {
             remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
         },
         // Additional options for better stability on server environments
-        restartOnAuthFail: true,
+        restartOnAuthFail: false, // Don't auto-restart on auth fail
         takeoverOnConflict: true,
         takeoverTimeoutMs: 0,
         // Timeout settings for better connection handling
         authTimeoutMs: 60000, // 60 seconds for auth
-        qrMaxRetries: 5
+        qrMaxRetries: 3 // Reduced retries
     });
 
     client.on('qr', (qr) => {
@@ -116,18 +122,18 @@ async function initializeWhatsAppClient() {
     });
 
     client.on('authenticated', async (session) => {
-        console.log('✅ WhatsApp authenticated');
-        console.log('💾 Saving session to database...');
+        console.log('✅ WhatsApp authenticated successfully!');
+        console.log('💾 Saving session to file for future use...');
         
         qrShown = false;
         reconnectAttempts = 0; // Reset on successful auth
         
-        // Save session to database for persistence
+        // Save session to file for persistence
         const saved = await saveSessionToDB(session);
         if (saved) {
-            console.log('✅ WhatsApp session saved to database successfully');
+            console.log('✅ Session saved! No QR code needed on next restart.');
         } else {
-            console.log('⚠️ Failed to save session to database');
+            console.log('⚠️ Failed to save session - you may need to scan QR again next time');
         }
     });
 
@@ -136,13 +142,13 @@ async function initializeWhatsAppClient() {
         qrShown = false;
         isClientInitialized = false;
         
-        // Clear corrupted session from database
-        console.log('🗑️ Clearing corrupted session from database...');
+        // Clear corrupted session from file
+        console.log('🗑️ Clearing corrupted session file...');
         await clearSessionFromDB();
         
         // Retry initialization after a delay
         setTimeout(() => {
-            console.log('🔄 Retrying WhatsApp client initialization...');
+            console.log('🔄 Retrying WhatsApp client initialization with fresh session...');
             initializeWhatsAppClient();
         }, 5000);
     });
@@ -154,7 +160,7 @@ async function initializeWhatsAppClient() {
         
         // Clear session on logout or session expiry
         if (reason === 'LOGOUT' || reason === 'NAVIGATION') {
-            console.log('🗑️ Clearing session due to logout/navigation');
+            console.log('🗑️ Clearing session file due to logout/navigation');
             await clearSessionFromDB();
         }
         
@@ -455,78 +461,87 @@ function removeAuthorizedNumberFromDb(number) {
 }
 
 // --- WHATSAPP SESSION MANAGEMENT ---
-// SQLite-based session storage for persistent WhatsApp authentication
+// File-based session storage for persistent WhatsApp authentication
+const SESSION_FILE = path.join(__dirname, 'whatsapp_session.json');
 
-// Save WhatsApp session to database
-function saveSessionToDB(session) {
-    return new Promise((resolve) => {
+// Save WhatsApp session to file
+function saveSessionToFile(session) {
+    try {
         if (!session) {
             console.log('⚠️ No session data to save');
-            resolve(false);
-            return;
+            return false;
         }
         
-        const sessionString = JSON.stringify(session);
-        db.run('DELETE FROM whatsapp_session', (err) => {
-            if (err) {
-                console.error('⚠️ Error clearing old session:', err);
-                resolve(false);
-                return;
-            }
-            
-            db.run('INSERT INTO whatsapp_session (session_data) VALUES (?)', [sessionString], function(err) {
-                if (err) {
-                    console.error('⚠️ Error saving session to database:', err);
-                    resolve(false);
-                    return;
-                }
-                console.log('💾 WhatsApp session saved to database successfully');
-                resolve(true);
-            });
-        });
-    });
+        // Convert session to JSON and save to file
+        const sessionData = {
+            WABrowserId: session.WABrowserId,
+            WASecretBundle: session.WASecretBundle,
+            WAToken1: session.WAToken1,
+            WAToken2: session.WAToken2,
+            timestamp: Date.now()
+        };
+        
+        fs.writeFileSync(SESSION_FILE, JSON.stringify(sessionData, null, 2));
+        console.log('💾 WhatsApp session saved to file successfully');
+        return true;
+    } catch (err) {
+        console.error('⚠️ Error saving session to file:', err);
+        return false;
+    }
 }
 
-// Load WhatsApp session from database
+// Load WhatsApp session from file
+function loadSessionFromFile() {
+    try {
+        if (!fs.existsSync(SESSION_FILE)) {
+            console.log('ℹ️ No session file found');
+            return null;
+        }
+        
+        const sessionData = fs.readFileSync(SESSION_FILE, 'utf8');
+        const session = JSON.parse(sessionData);
+        
+        // Check if session is not too old (optional: 30 days)
+        const thirtyDaysAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
+        if (session.timestamp && session.timestamp < thirtyDaysAgo) {
+            console.log('⚠️ Session is too old, clearing...');
+            clearSessionFile();
+            return null;
+        }
+        
+        console.log('✅ WhatsApp session loaded from file');
+        return session;
+    } catch (err) {
+        console.error('⚠️ Error loading session from file:', err);
+        return null;
+    }
+}
+
+// Clear WhatsApp session file
+function clearSessionFile() {
+    try {
+        if (fs.existsSync(SESSION_FILE)) {
+            fs.unlinkSync(SESSION_FILE);
+            console.log('🗑️ WhatsApp session file cleared');
+        }
+        return true;
+    } catch (err) {
+        console.error('⚠️ Error clearing session file:', err);
+        return false;
+    }
+}
+
+// Legacy database functions (kept for compatibility)
+function saveSessionToDB(session) {
+    return Promise.resolve(saveSessionToFile(session));
+}
+
 function loadSessionFromDB() {
-    return new Promise((resolve) => {
-        db.get('SELECT session_data FROM whatsapp_session ORDER BY created_at DESC LIMIT 1', (err, row) => {
-            if (err) {
-                console.error('⚠️ Error loading session from database:', err);
-                resolve(null);
-                return;
-            }
-            
-            if (row && row.session_data) {
-                try {
-                    const session = JSON.parse(row.session_data);
-                    console.log('✅ WhatsApp session loaded from database');
-                    resolve(session);
-                } catch (parseErr) {
-                    console.error('⚠️ Error parsing session data:', parseErr);
-                    resolve(null);
-                }
-            } else {
-                console.log('ℹ️ No session found in database');
-                resolve(null);
-            }
-        });
-    });
+    return Promise.resolve(loadSessionFromFile());
 }
 
-// Clear WhatsApp session from database
 function clearSessionFromDB() {
-    return new Promise((resolve) => {
-        db.run('DELETE FROM whatsapp_session', function(err) {
-            if (err) {
-                console.error('⚠️ Error clearing session from database:', err);
-                resolve(false);
-                return;
-            }
-            console.log('🗑️ WhatsApp session cleared from database');
-            resolve(true);
-        });
-    });
+    return Promise.resolve(clearSessionFile());
 }
 
 // Database helper functions
