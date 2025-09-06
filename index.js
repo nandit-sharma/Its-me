@@ -65,15 +65,25 @@ function initializeWhatsAppClient() {
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
+                '--disable-extensions',
+                '--disable-gpu',
+                '--single-process',
                 '--disable-accelerated-2d-canvas',
                 '--no-first-run',
                 '--no-zygote',
-                '--disable-gpu',
                 '--disable-web-security',
                 '--disable-features=VizDisplayCompositor',
                 '--disable-background-timer-throttling',
                 '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding'
+                '--disable-renderer-backgrounding',
+                '--disable-default-apps',
+                '--disable-sync',
+                '--disable-translate',
+                '--hide-scrollbars',
+                '--mute-audio',
+                '--no-default-browser-check',
+                '--no-pings',
+                '--disable-ipc-flooding-protection'
             ]
         },
         // Enhanced session persistence settings
@@ -81,15 +91,20 @@ function initializeWhatsAppClient() {
             type: 'remote',
             remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
         },
-        // Additional options for better stability
+        // Additional options for better stability on server environments
         restartOnAuthFail: true,
         takeoverOnConflict: true,
-        takeoverTimeoutMs: 0
+        takeoverTimeoutMs: 0,
+        // Timeout settings for better connection handling
+        authTimeoutMs: 60000, // 60 seconds for auth
+        qrMaxRetries: 5
     });
 
     client.on('qr', (qr) => {
         if (!qrShown) {
             console.log('WhatsApp QR Code generated. Scan with your phone:');
+            console.log('📱 Make sure your phone has a stable internet connection');
+            console.log('🔄 QR Code will refresh automatically if not scanned within 20 seconds');
             qrcode.generate(qr, { small: true });
             qrShown = true;
             reconnectAttempts = 0; // Reset reconnect attempts on new QR
@@ -112,7 +127,15 @@ function initializeWhatsAppClient() {
     client.on('auth_failure', (msg) => {
         console.error('❌ WhatsApp authentication failed:', msg);
         qrShown = false;
-        // Don't reinitialize immediately to prevent loops
+        isClientInitialized = false;
+        
+        // Wait and retry authentication
+        setTimeout(() => {
+            if (!isClientInitialized) {
+                console.log('🔄 Retrying WhatsApp authentication...');
+                initializeWhatsAppClient();
+            }
+        }, 5000);
     });
 
     client.on('disconnected', async (reason) => {
@@ -141,30 +164,51 @@ function initializeWhatsAppClient() {
 
     // Add additional event handlers for better session management
     client.on('loading_screen', (percent, message) => {
-        console.log('⏳ WhatsApp loading:', percent, message);
+        console.log(`⏳ WhatsApp loading: ${percent}% - ${message}`);
     });
     
     client.on('change_state', (state) => {
         console.log('🔄 WhatsApp state changed:', state);
     });
     
-    // Initialize the client with retry logic
+    // Add timeout handler for QR code
+    client.on('qr', () => {
+        setTimeout(() => {
+            if (qrShown && !isClientInitialized) {
+                console.log('⏰ QR Code expired, generating new one...');
+                qrShown = false;
+            }
+        }, 20000); // 20 seconds timeout
+    });
+    
+    // Add connection monitoring
+    client.on('message', () => {
+        // Reset reconnect attempts on successful message handling
+        reconnectAttempts = 0;
+    });
+    
+    // Initialize the client with enhanced retry logic
     const initializeWithRetry = async (retryCount = 0) => {
         try {
+            console.log(`🚀 Starting WhatsApp client initialization (attempt ${retryCount + 1})...`);
+            console.log('🔧 Using enhanced Puppeteer configuration for server environment');
+            
             await client.initialize();
             isClientInitialized = true;
-            console.log('🚀 WhatsApp client initialization started');
+            console.log('✅ WhatsApp client initialization successful');
         } catch (err) {
-            console.error('❌ Failed to initialize WhatsApp client:', err);
+            console.error('❌ Failed to initialize WhatsApp client:', err.message);
             isClientInitialized = false;
             qrShown = false;
             
-            // Retry up to 3 times
-            if (retryCount < 3) {
-                console.log(`🔄 Retrying initialization (${retryCount + 1}/3) in 5 seconds...`);
-                setTimeout(() => initializeWithRetry(retryCount + 1), 5000);
+            // Retry up to 5 times with increasing delays
+            if (retryCount < 5) {
+                const delay = (retryCount + 1) * 3000; // 3s, 6s, 9s, 12s, 15s
+                console.log(`🔄 Retrying initialization (${retryCount + 1}/5) in ${delay/1000} seconds...`);
+                setTimeout(() => initializeWithRetry(retryCount + 1), delay);
             } else {
-                console.error('💥 Max retry attempts reached. Manual intervention required.');
+                console.error('💥 Max retry attempts reached. Check server environment and dependencies.');
+                console.error('💡 Consider checking Render logs for Puppeteer/Chrome dependency issues.');
             }
         }
     };
@@ -172,7 +216,11 @@ function initializeWhatsAppClient() {
     initializeWithRetry();
 }
 
-// Start WhatsApp client initialization
+// Start WhatsApp client initialization with environment check
+console.log('🌐 Environment:', process.env.NODE_ENV || 'development');
+console.log('📁 Sessions directory:', path.join(__dirname, 'sessions'));
+console.log('🤖 Starting WhatsApp bot with enhanced server compatibility...');
+
 initializeWhatsAppClient();
 
 // --- ENHANCED DATABASE SETUP WITH PERSISTENCE ---
