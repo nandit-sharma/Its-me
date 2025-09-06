@@ -50,8 +50,16 @@ function initializeWhatsAppClient() {
                 '--no-zygote',
                 '--disable-gpu',
                 '--disable-web-security',
-                '--disable-features=VizDisplayCompositor'
+                '--disable-features=VizDisplayCompositor',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding'
             ]
+        },
+        // Keep connection alive settings
+        webVersionCache: {
+            type: 'remote',
+            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
         }
     });
 
@@ -83,13 +91,20 @@ function initializeWhatsAppClient() {
         console.log('❌ WhatsApp client disconnected:', reason);
         qrShown = false;
         isClientInitialized = false;
-        // Only reinitialize after a delay to prevent rapid restarts
+        
+        // Don't reconnect on LOGOUT - user manually logged out
+        if (reason === 'LOGOUT') {
+            console.log('🚪 User logged out manually, not reconnecting automatically');
+            return;
+        }
+        
+        // Only reinitialize after a delay for other disconnect reasons
         setTimeout(() => {
             if (!isClientInitialized) {
                 console.log('🔄 Attempting to reconnect WhatsApp client...');
                 initializeWhatsAppClient();
             }
-        }, 10000); // 10 second delay
+        }, 15000); // 15 second delay to prevent rapid reconnects
     });
 
     // Initialize the client
@@ -110,7 +125,7 @@ initializeWhatsAppClient();
 const DB_FILE = path.join(__dirname, 'rules.db');
 let db;
 
-// Initialize database with better error handling
+// Initialize database with proper synchronization
 function initializeDatabase() {
     return new Promise((resolve, reject) => {
         db = new sqlite3.Database(DB_FILE, (err) => {
@@ -121,23 +136,48 @@ function initializeDatabase() {
             }
             console.log('📊 Connected to SQLite database');
             
-            // Create tables with enhanced structure
+            // Create tables with enhanced structure - using serialize for proper order
             db.serialize(() => {
+                let tablesCreated = 0;
+                const totalTables = 3;
+                
                 // Rules table
                 db.run(`CREATE TABLE IF NOT EXISTS rules (
                     trigger TEXT PRIMARY KEY,
                     reply TEXT NOT NULL,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )`);
+                )`, (err) => {
+                    if (err) {
+                        console.error('❌ Error creating rules table:', err);
+                        reject(err);
+                        return;
+                    }
+                    tablesCreated++;
+                    if (tablesCreated === totalTables) {
+                        console.log("✅ SQLite database initialized with all tables");
+                        resolve(db);
+                    }
+                });
                 
-                // Authorized numbers table (migrate from JSON)
+                // Authorized numbers table
                 db.run(`CREATE TABLE IF NOT EXISTS authorized_numbers (
                     number TEXT PRIMARY KEY,
                     added_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )`);
+                )`, (err) => {
+                    if (err) {
+                        console.error('❌ Error creating authorized_numbers table:', err);
+                        reject(err);
+                        return;
+                    }
+                    tablesCreated++;
+                    if (tablesCreated === totalTables) {
+                        console.log("✅ SQLite database initialized with all tables");
+                        resolve(db);
+                    }
+                });
                 
-                // Schedules table (migrate from JSON)
+                // Schedules table
                 db.run(`CREATE TABLE IF NOT EXISTS schedules (
                     id TEXT PRIMARY KEY,
                     number TEXT NOT NULL,
@@ -145,17 +185,34 @@ function initializeDatabase() {
                     hour INTEGER NOT NULL,
                     minute INTEGER NOT NULL,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )`);
-                
-                console.log("✅ SQLite database initialized with all tables");
-                resolve(db);
+                )`, (err) => {
+                    if (err) {
+                        console.error('❌ Error creating schedules table:', err);
+                        reject(err);
+                        return;
+                    }
+                    tablesCreated++;
+                    if (tablesCreated === totalTables) {
+                        console.log("✅ SQLite database initialized with all tables");
+                        resolve(db);
+                    }
+                });
             });
         });
     });
 }
 
-// Initialize database at startup
-initializeDatabase().catch(err => {
+// Global flag to track database readiness
+let isDatabaseReady = false;
+
+// Initialize database at startup with proper error handling
+initializeDatabase().then(() => {
+    isDatabaseReady = true;
+    console.log('🎯 Database is ready for operations');
+    
+    // Initialize data after database is ready
+    initializeDataAfterDb();
+}).catch(err => {
     console.error('❌ Failed to initialize database:', err);
     process.exit(1);
 });
@@ -232,6 +289,12 @@ function removeAuthorizedNumberFromDb(number) {
 
 // Database helper functions
 function loadRulesFromDB(callback) {
+    if (!isDatabaseReady) {
+        console.log('⏳ Database not ready, waiting...');
+        setTimeout(() => loadRulesFromDB(callback), 500);
+        return;
+    }
+    
     db.all("SELECT * FROM rules", (err, rows) => {
         if (err) {
             console.error("⚠️ Error loading rules from database:", err);
@@ -314,25 +377,31 @@ function isAdmin(chatId) {
 // Initialize global rules object
 let rules = {};
 
-// Load rules at startup
-loadRulesFromDB((loadedRules) => {
-    rules = loadedRules;
-});
-
-// --- Initialize data at startup ---
-// Wait for database to be ready, then migrate and load data
-setTimeout(async () => {
-    // Migrate existing JSON data to database
-    migrateAuthorizedNumbersToDb();
+// Function to initialize all data after database is ready
+function initializeDataAfterDb() {
+    console.log('🔄 Starting data initialization...');
     
-    // Load authorized numbers from database
-    authorizedNumbers = await loadAuthorizedNumbersFromDb();
-    
-    // Load rules
+    // Load rules first
     loadRulesFromDB((loadedRules) => {
         rules = loadedRules;
+        console.log('✅ Rules initialized');
     });
-}, 1000); // Wait 1 second for database initialization
+    
+    // Migrate and load authorized numbers
+    setTimeout(async () => {
+        migrateAuthorizedNumbersToDb();
+        authorizedNumbers = await loadAuthorizedNumbersFromDb();
+        console.log('✅ Authorized numbers initialized');
+    }, 500);
+    
+    // Migrate and load schedules
+    setTimeout(async () => {
+        migrateSchedulesToDb();
+        schedules = await loadSchedulesFromDb();
+        initSchedules();
+        console.log('✅ Schedules initialized');
+    }, 1000);
+}
 
 // --- SEND COMMAND ---
 // Format: /send <number> "message"
@@ -883,14 +952,5 @@ bot.onText(/^\/cancelschedule\s+(\d+)\s+(\d{2}):(\d{2})$/, async (msg, match) =>
     }
 });
 
-// Load schedules on startup with database migration
-setTimeout(async () => {
-    // Migrate existing JSON schedules to database
-    migrateSchedulesToDb();
-    
-    // Load schedules from database
-    schedules = await loadSchedulesFromDb();
-    
-    // Initialize cron jobs
-    initSchedules();
-}, 2000); // Wait 2 seconds for database initialization
+// Schedules will be initialized by initializeDataAfterDb() function
+// No need for separate timeout here
