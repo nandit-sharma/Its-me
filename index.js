@@ -22,70 +22,213 @@ const PORT = process.env.PORT || 3000;
 app.get("/", (req, res) => res.send("Bot is running ✅"));
 app.listen(PORT, () => console.log(`🌍 Server running on port ${PORT}`));
 
-// WhatsApp client setup with session persistence
-const client = new Client({
-    authStrategy: new LocalAuth({
-        clientId: "whatsapp-session",
-        dataPath: path.join(__dirname, '.wwebjs_auth')
-    }),
-    puppeteer: {
-        headless: true,
-        args: [
-            '--no-sandbox', 
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu'
-        ]
+// WhatsApp client setup with enhanced session persistence
+let client;
+let isClientInitialized = false;
+let qrShown = false;
+
+function initializeWhatsAppClient() {
+    if (isClientInitialized) {
+        console.log('⚠️ WhatsApp client already initialized, skipping...');
+        return;
     }
-});
 
-client.on('qr', (qr) => {
-    console.log('WhatsApp QR Code generated. Scan with your phone:');
-    qrcode.generate(qr, { small: true });
-});
+    client = new Client({
+        authStrategy: new LocalAuth({
+            clientId: "whatsapp-bot-session",
+            dataPath: path.join(__dirname, '.wwebjs_auth'),
+            backupSyncIntervalMs: 300000 // 5 minutes backup sync
+        }),
+        puppeteer: {
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu',
+                '--disable-web-security',
+                '--disable-features=VizDisplayCompositor'
+            ]
+        }
+    });
 
-client.on('ready', () => {
-    console.log('✅ WhatsApp client is ready!');
-});
+    client.on('qr', (qr) => {
+        if (!qrShown) {
+            console.log('WhatsApp QR Code generated. Scan with your phone:');
+            qrcode.generate(qr, { small: true });
+            qrShown = true;
+        }
+    });
 
-client.on('authenticated', () => {
-    console.log('✅ WhatsApp authenticated');
-});
+    client.on('ready', () => {
+        console.log('✅ WhatsApp client is ready!');
+        qrShown = false; // Reset for future sessions
+    });
 
-client.on('auth_failure', (msg) => {
-    console.error('❌ WhatsApp authentication failed:', msg);
-});
+    client.on('authenticated', () => {
+        console.log('✅ WhatsApp authenticated');
+        qrShown = false;
+    });
 
-client.on('disconnected', (reason) => {
-    console.log('❌ WhatsApp client disconnected:', reason);
-});
+    client.on('auth_failure', (msg) => {
+        console.error('❌ WhatsApp authentication failed:', msg);
+        qrShown = false;
+        // Don't reinitialize immediately to prevent loops
+    });
 
-// Initialize WhatsApp client
-client.initialize().catch(err => {
-    console.error('❌ Failed to initialize WhatsApp client:', err);
-});
+    client.on('disconnected', (reason) => {
+        console.log('❌ WhatsApp client disconnected:', reason);
+        qrShown = false;
+        isClientInitialized = false;
+        // Only reinitialize after a delay to prevent rapid restarts
+        setTimeout(() => {
+            if (!isClientInitialized) {
+                console.log('🔄 Attempting to reconnect WhatsApp client...');
+                initializeWhatsAppClient();
+            }
+        }, 10000); // 10 second delay
+    });
 
-// --- SQLITE DATABASE SETUP ---
+    // Initialize the client
+    client.initialize().then(() => {
+        isClientInitialized = true;
+        console.log('🚀 WhatsApp client initialization started');
+    }).catch(err => {
+        console.error('❌ Failed to initialize WhatsApp client:', err);
+        isClientInitialized = false;
+        qrShown = false;
+    });
+}
+
+// Start WhatsApp client initialization
+initializeWhatsAppClient();
+
+// --- ENHANCED DATABASE SETUP WITH PERSISTENCE ---
 const DB_FILE = path.join(__dirname, 'rules.db');
-const db = new sqlite3.Database(DB_FILE);
+let db;
 
-// Initialize database tables
-db.serialize(() => {
-    db.run(`CREATE TABLE IF NOT EXISTS rules (
-        trigger TEXT PRIMARY KEY,
-        reply TEXT
-    )`);
-    console.log("✅ SQLite database initialized");
+// Initialize database with better error handling
+function initializeDatabase() {
+    return new Promise((resolve, reject) => {
+        db = new sqlite3.Database(DB_FILE, (err) => {
+            if (err) {
+                console.error('❌ Error opening database:', err);
+                reject(err);
+                return;
+            }
+            console.log('📊 Connected to SQLite database');
+            
+            // Create tables with enhanced structure
+            db.serialize(() => {
+                // Rules table
+                db.run(`CREATE TABLE IF NOT EXISTS rules (
+                    trigger TEXT PRIMARY KEY,
+                    reply TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )`);
+                
+                // Authorized numbers table (migrate from JSON)
+                db.run(`CREATE TABLE IF NOT EXISTS authorized_numbers (
+                    number TEXT PRIMARY KEY,
+                    added_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )`);
+                
+                // Schedules table (migrate from JSON)
+                db.run(`CREATE TABLE IF NOT EXISTS schedules (
+                    id TEXT PRIMARY KEY,
+                    number TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    hour INTEGER NOT NULL,
+                    minute INTEGER NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )`);
+                
+                console.log("✅ SQLite database initialized with all tables");
+                resolve(db);
+            });
+        });
+    });
+}
+
+// Initialize database at startup
+initializeDatabase().catch(err => {
+    console.error('❌ Failed to initialize database:', err);
+    process.exit(1);
 });
 
-// --- AUTHORIZED NUMBERS FILE ---
+// --- AUTHORIZED NUMBERS WITH DATABASE PERSISTENCE ---
 const AUTHORIZED_NUMBERS_FILE = path.join(__dirname, 'authorized_numbers.json');
-
-// --- Load Authorized Numbers ---
 let authorizedNumbers = [];
+
+// Migrate JSON data to database
+function migrateAuthorizedNumbersToDb() {
+    if (fs.existsSync(AUTHORIZED_NUMBERS_FILE)) {
+        try {
+            const data = fs.readFileSync(AUTHORIZED_NUMBERS_FILE, 'utf8');
+            const jsonNumbers = data.trim() ? JSON.parse(data) : [];
+            
+            if (jsonNumbers.length > 0) {
+                console.log('🔄 Migrating authorized numbers to database...');
+                jsonNumbers.forEach(number => {
+                    db.run('INSERT OR IGNORE INTO authorized_numbers (number) VALUES (?)', [number]);
+                });
+                console.log(`✅ Migrated ${jsonNumbers.length} authorized numbers to database`);
+            }
+        } catch (err) {
+            console.error('⚠️ Error migrating authorized numbers:', err);
+        }
+    }
+}
+
+// Load authorized numbers from database
+function loadAuthorizedNumbersFromDb() {
+    return new Promise((resolve) => {
+        db.all('SELECT number FROM authorized_numbers', (err, rows) => {
+            if (err) {
+                console.error('⚠️ Error loading authorized numbers from database:', err);
+                resolve([]);
+                return;
+            }
+            const numbers = rows.map(row => row.number);
+            console.log(`✅ Authorized numbers loaded from database: ${numbers.length} numbers found`);
+            resolve(numbers);
+        });
+    });
+}
+
+// Save authorized number to database
+function saveAuthorizedNumberToDb(number) {
+    return new Promise((resolve) => {
+        db.run('INSERT OR IGNORE INTO authorized_numbers (number) VALUES (?)', [number], function(err) {
+            if (err) {
+                console.error('⚠️ Error saving authorized number:', err);
+                resolve(false);
+                return;
+            }
+            console.log(`💾 Authorized number saved to database: +${number}`);
+            resolve(true);
+        });
+    });
+}
+
+// Remove authorized number from database
+function removeAuthorizedNumberFromDb(number) {
+    return new Promise((resolve) => {
+        db.run('DELETE FROM authorized_numbers WHERE number = ?', [number], function(err) {
+            if (err) {
+                console.error('⚠️ Error removing authorized number:', err);
+                resolve(false);
+                return;
+            }
+            console.log(`🗑️ Authorized number removed from database: +${number}`);
+            resolve(this.changes > 0);
+        });
+    });
+}
 
 // Database helper functions
 function loadRulesFromDB(callback) {
@@ -143,30 +286,17 @@ function getRuleFromDB(trigger, callback) {
     });
 }
 
+// Legacy functions for backward compatibility
 function loadAuthorizedNumbers() {
-    if (fs.existsSync(AUTHORIZED_NUMBERS_FILE)) {
-        try {
-            const data = fs.readFileSync(AUTHORIZED_NUMBERS_FILE, 'utf8');
-            authorizedNumbers = data.trim() ? JSON.parse(data) : [];
-            console.log("✅ Authorized numbers loaded:", authorizedNumbers.length, "numbers found");
-        } catch (err) {
-            console.error("⚠️ Error reading authorized_numbers.json:", err);
-            authorizedNumbers = [];
-        }
-    } else {
-        authorizedNumbers = [];
-        fs.writeFileSync(AUTHORIZED_NUMBERS_FILE, JSON.stringify(authorizedNumbers, null, 2));
-        console.log("🆕 authorized_numbers.json created");
-    }
+    // This now loads from database instead of JSON
+    loadAuthorizedNumbersFromDb().then(numbers => {
+        authorizedNumbers = numbers;
+    });
 }
 
 function saveAuthorizedNumbers() {
-    try {
-        fs.writeFileSync(AUTHORIZED_NUMBERS_FILE, JSON.stringify(authorizedNumbers, null, 2));
-        console.log("💾 Authorized numbers saved:", authorizedNumbers.length, "numbers total");
-    } catch (err) {
-        console.error("⚠️ Error saving authorized_numbers.json:", err);
-    }
+    // This is now handled by individual database operations
+    console.log("💾 Authorized numbers are automatically saved to database");
 }
 
 // Function to check if a number is authorized
@@ -189,8 +319,20 @@ loadRulesFromDB((loadedRules) => {
     rules = loadedRules;
 });
 
-// --- Load authorized numbers at startup ---
-loadAuthorizedNumbers();
+// --- Initialize data at startup ---
+// Wait for database to be ready, then migrate and load data
+setTimeout(async () => {
+    // Migrate existing JSON data to database
+    migrateAuthorizedNumbersToDb();
+    
+    // Load authorized numbers from database
+    authorizedNumbers = await loadAuthorizedNumbersFromDb();
+    
+    // Load rules
+    loadRulesFromDB((loadedRules) => {
+        rules = loadedRules;
+    });
+}, 1000); // Wait 1 second for database initialization
 
 // --- SEND COMMAND ---
 // Format: /send <number> "message"
@@ -345,7 +487,7 @@ bot.onText(/\/editrule\s*"([^"]+)"\s*"([^"]+)"/, (msg, match) => {
 
 // --- AUTHORIZED NUMBERS MANAGEMENT COMMANDS ---
 // Add authorized number
-bot.onText(/\/addnumber\s+(\d+)/, (msg, match) => {
+bot.onText(/\/addnumber\s+(\d+)/, async (msg, match) => {
     const chatId = msg.chat.id;
     if (!isAdmin(chatId)) {
         bot.sendMessage(chatId, "❌ You don't have permission to manage authorized numbers.");
@@ -363,9 +505,13 @@ bot.onText(/\/addnumber\s+(\d+)/, (msg, match) => {
     if (authorizedNumbers.includes(number)) {
         bot.sendMessage(chatId, `⚠️ Number +${number} is already authorized.`);
     } else {
-        authorizedNumbers.push(number);
-        saveAuthorizedNumbers();
-        bot.sendMessage(chatId, `✅ Number +${number} added to authorized list.\n\nThis number can now receive auto-replies from the bot.`);
+        const success = await saveAuthorizedNumberToDb(number);
+        if (success) {
+            authorizedNumbers.push(number);
+            bot.sendMessage(chatId, `✅ Number +${number} added to authorized list.\n\nThis number can now receive auto-replies from the bot.`);
+        } else {
+            bot.sendMessage(chatId, `❌ Failed to add number +${number} to database.`);
+        }
     }
 });
 
@@ -390,7 +536,7 @@ bot.onText(/\/listnumbers/, (msg) => {
 });
 
 // Remove authorized number
-bot.onText(/\/removenumber\s+(\d+)/, (msg, match) => {
+bot.onText(/\/removenumber\s+(\d+)/, async (msg, match) => {
     const chatId = msg.chat.id;
     if (!isAdmin(chatId)) {
         bot.sendMessage(chatId, "❌ You don't have permission to manage authorized numbers.");
@@ -407,9 +553,13 @@ bot.onText(/\/removenumber\s+(\d+)/, (msg, match) => {
     
     const index = authorizedNumbers.indexOf(number);
     if (index > -1) {
-        authorizedNumbers.splice(index, 1);
-        saveAuthorizedNumbers();
-        bot.sendMessage(chatId, `🗑️ Number +${number} removed from authorized list.`);
+        const success = await removeAuthorizedNumberFromDb(number);
+        if (success) {
+            authorizedNumbers.splice(index, 1);
+            bot.sendMessage(chatId, `🗑️ Number +${number} removed from authorized list.`);
+        } else {
+            bot.sendMessage(chatId, `❌ Failed to remove number +${number} from database.`);
+        }
     } else {
         bot.sendMessage(chatId, `⚠️ Number +${number} is not in the authorized list.`);
     }
@@ -496,37 +646,98 @@ client.on('message', async (msg) => {
 
 // NEW WORk...
 
-// --- SCHEDULED MESSAGES ---
-// Requires: npm install node-cron
+// --- SCHEDULED MESSAGES WITH DATABASE PERSISTENCE ---
 const cron = require('node-cron');
 const SCHEDULE_FILE = path.join(__dirname, 'schedule.json');
 
-// --- Load Schedules ---
+// --- Enhanced Schedule Management ---
 let schedules = {};
-function loadSchedules() {
+
+// Migrate JSON schedules to database
+function migrateSchedulesToDb() {
     if (fs.existsSync(SCHEDULE_FILE)) {
         try {
             const data = fs.readFileSync(SCHEDULE_FILE, 'utf8');
-            schedules = data.trim() ? JSON.parse(data) : {};
-            console.log("✅ Schedules loaded:", Object.keys(schedules).length, "found");
+            const jsonSchedules = data.trim() ? JSON.parse(data) : {};
+            
+            if (Object.keys(jsonSchedules).length > 0) {
+                console.log('🔄 Migrating schedules to database...');
+                for (const [id, schedule] of Object.entries(jsonSchedules)) {
+                    db.run('INSERT OR IGNORE INTO schedules (id, number, message, hour, minute) VALUES (?, ?, ?, ?, ?)', 
+                        [id, schedule.number, schedule.text, schedule.hour, schedule.minute]);
+                }
+                console.log(`✅ Migrated ${Object.keys(jsonSchedules).length} schedules to database`);
+            }
         } catch (err) {
-            console.error("⚠️ Error reading schedule.json:", err);
-            schedules = {};
+            console.error('⚠️ Error migrating schedules:', err);
         }
-    } else {
-        schedules = {};
-        fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(schedules, null, 2));
-        console.log("🆕 schedule.json created");
     }
 }
 
+// Load schedules from database
+function loadSchedulesFromDb() {
+    return new Promise((resolve) => {
+        db.all('SELECT * FROM schedules', (err, rows) => {
+            if (err) {
+                console.error('⚠️ Error loading schedules from database:', err);
+                resolve({});
+                return;
+            }
+            const dbSchedules = {};
+            rows.forEach(row => {
+                dbSchedules[row.id] = {
+                    number: row.number,
+                    text: row.message,
+                    hour: row.hour,
+                    minute: row.minute
+                };
+            });
+            console.log(`✅ Schedules loaded from database: ${rows.length} found`);
+            resolve(dbSchedules);
+        });
+    });
+}
+
+// Save schedule to database
+function saveScheduleToDb(id, schedule) {
+    return new Promise((resolve) => {
+        db.run('INSERT OR REPLACE INTO schedules (id, number, message, hour, minute) VALUES (?, ?, ?, ?, ?)', 
+            [id, schedule.number, schedule.text, schedule.hour, schedule.minute], function(err) {
+            if (err) {
+                console.error('⚠️ Error saving schedule:', err);
+                resolve(false);
+                return;
+            }
+            console.log(`💾 Schedule saved to database: ${id}`);
+            resolve(true);
+        });
+    });
+}
+
+// Remove schedule from database
+function removeScheduleFromDb(id) {
+    return new Promise((resolve) => {
+        db.run('DELETE FROM schedules WHERE id = ?', [id], function(err) {
+            if (err) {
+                console.error('⚠️ Error removing schedule:', err);
+                resolve(false);
+                return;
+            }
+            console.log(`🗑️ Schedule removed from database: ${id}`);
+            resolve(this.changes > 0);
+        });
+    });
+}
+
+// Legacy functions for backward compatibility
+function loadSchedules() {
+    loadSchedulesFromDb().then(dbSchedules => {
+        schedules = dbSchedules;
+    });
+}
+
 function saveSchedules() {
-    try {
-        fs.writeFileSync(SCHEDULE_FILE, JSON.stringify(schedules, null, 2));
-        console.log("💾 Schedules saved:", Object.keys(schedules).length, "total");
-    } catch (err) {
-        console.error("⚠️ Error saving schedule.json:", err);
-    }
+    console.log("💾 Schedules are automatically saved to database");
 }
 
 // Store active cron jobs
@@ -581,7 +792,7 @@ function createSchedule(id, { number, text, hour, minute }) {
 
 // --- Telegram Commands ---
 // /schedule <number> "message" HH:MM
-bot.onText(/^\/schedule\s+(\d+)\s+"([^"]+)"\s+(\d{2}):(\d{2})$/, (msg, match) => {
+bot.onText(/^\/schedule\s+(\d+)\s+"([^"]+)"\s+(\d{2}):(\d{2})$/, async (msg, match) => {
     const chatId = msg.chat.id;
     let number = match[1];
     const text = match[2];
@@ -602,17 +813,23 @@ bot.onText(/^\/schedule\s+(\d+)\s+"([^"]+)"\s+(\d{2}):(\d{2})$/, (msg, match) =>
         delete scheduledJobs[id];
     }
 
-    // Save to schedules.json
-    schedules[id] = { number, text, hour, minute };
-    saveSchedules();
-
-    // Create new schedule
-    try {
-        createSchedule(id, schedules[id]);
-        bot.sendMessage(chatId, `✅ Scheduled daily message:\nTo: +${number}\nText: "${text}"\nTime: ${hour}:${minute}\n\n📅 This message will be sent every day at ${hour}:${minute}`);
-    } catch (err) {
-        console.error('Error creating schedule:', err);
-        bot.sendMessage(chatId, `⚠️ Failed to create schedule: ${err.message}`);
+    // Save to database
+    const scheduleData = { number, text, hour, minute };
+    const success = await saveScheduleToDb(id, scheduleData);
+    
+    if (success) {
+        schedules[id] = scheduleData;
+        
+        // Create new schedule
+        try {
+            createSchedule(id, schedules[id]);
+            bot.sendMessage(chatId, `✅ Scheduled daily message:\nTo: +${number}\nText: "${text}"\nTime: ${hour}:${minute}\n\n📅 This message will be sent every day at ${hour}:${minute}`);
+        } catch (err) {
+            console.error('Error creating schedule:', err);
+            bot.sendMessage(chatId, `⚠️ Failed to create schedule: ${err.message}`);
+        }
+    } else {
+        bot.sendMessage(chatId, `❌ Failed to save schedule to database.`);
     }
 });
 
@@ -633,7 +850,7 @@ bot.onText(/\/listschedules/, (msg) => {
 });
 
 // /cancelschedule <number> HH:MM
-bot.onText(/^\/cancelschedule\s+(\d+)\s+(\d{2}):(\d{2})$/, (msg, match) => {
+bot.onText(/^\/cancelschedule\s+(\d+)\s+(\d{2}):(\d{2})$/, async (msg, match) => {
     const chatId = msg.chat.id;
     let number = match[1];
     const hour = match[2];
@@ -654,14 +871,26 @@ bot.onText(/^\/cancelschedule\s+(\d+)\s+(\d{2}):(\d{2})$/, (msg, match) => {
     }
 
     if (schedules[id]) {
-        delete schedules[id];
-        saveSchedules();
-        bot.sendMessage(chatId, `🗑️ Schedule for +${number} at ${hour}:${minute} cancelled.`);
+        const success = await removeScheduleFromDb(id);
+        if (success) {
+            delete schedules[id];
+            bot.sendMessage(chatId, `🗑️ Schedule for +${number} at ${hour}:${minute} cancelled.`);
+        } else {
+            bot.sendMessage(chatId, `❌ Failed to remove schedule from database.`);
+        }
     } else {
         bot.sendMessage(chatId, `⚠️ No schedule found for +${number} at ${hour}:${minute}.`);
     }
 });
 
-// Load schedules on startup
-loadSchedules();
-initSchedules();
+// Load schedules on startup with database migration
+setTimeout(async () => {
+    // Migrate existing JSON schedules to database
+    migrateSchedulesToDb();
+    
+    // Load schedules from database
+    schedules = await loadSchedulesFromDb();
+    
+    // Initialize cron jobs
+    initSchedules();
+}, 2000); // Wait 2 seconds for database initialization
