@@ -1,6 +1,10 @@
 # Dependencies
 node_modules/
-npm-debug.log*
+.env
+*.log
+logs/
+sessions/session-*
+sessions/*.db*
 yarn-debug.log*
 yarn-error.log*
 

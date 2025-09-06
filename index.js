@@ -29,20 +29,19 @@ let qrShown = false;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
 
-// Ensure data directory exists for persistent storage
-function ensureDataDirectory() {
-    const dataPath = process.env.NODE_ENV === 'production' ? '/data' : __dirname;
-    const authPath = path.join(dataPath, '.wwebjs_auth');
+// Ensure sessions directory exists for persistent storage
+function ensureSessionsDirectory() {
+    const sessionsPath = path.join(__dirname, 'sessions');
     
-    if (!fs.existsSync(authPath)) {
+    if (!fs.existsSync(sessionsPath)) {
         try {
-            fs.mkdirSync(authPath, { recursive: true });
-            console.log('📁 Created WhatsApp auth directory:', authPath);
+            fs.mkdirSync(sessionsPath, { recursive: true });
+            console.log('📁 Created WhatsApp sessions directory:', sessionsPath);
         } catch (err) {
-            console.error('❌ Failed to create auth directory:', err);
+            console.error('❌ Failed to create sessions directory:', err);
         }
     }
-    return authPath;
+    return sessionsPath;
 }
 
 function initializeWhatsAppClient() {
@@ -51,13 +50,13 @@ function initializeWhatsAppClient() {
         return;
     }
     
-    // Ensure data directory exists
-    ensureDataDirectory();
+    // Ensure sessions directory exists
+    ensureSessionsDirectory();
 
     client = new Client({
         authStrategy: new LocalAuth({
             clientId: "whatsapp-bot-session",
-            dataPath: process.env.NODE_ENV === 'production' ? '/data/.wwebjs_auth' : path.join(__dirname, '.wwebjs_auth'),
+            dataPath: path.join(__dirname, 'sessions'),
             backupSyncIntervalMs: 300000 // 5 minutes backup sync
         }),
         puppeteer: {
@@ -177,7 +176,7 @@ function initializeWhatsAppClient() {
 initializeWhatsAppClient();
 
 // --- ENHANCED DATABASE SETUP WITH PERSISTENCE ---
-const DB_FILE = path.join(__dirname, 'rules.db');
+const DB_FILE = path.join(__dirname, 'sessions', 'rules.db');
 let db;
 
 // Initialize database with proper synchronization
