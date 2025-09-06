@@ -44,7 +44,7 @@ function ensureSessionsDirectory() {
     return sessionsPath;
 }
 
-function initializeWhatsAppClient() {
+async function initializeWhatsAppClient() {
     if (isClientInitialized) {
         console.log('⚠️ WhatsApp client already initialized, skipping...');
         return;
@@ -52,13 +52,13 @@ function initializeWhatsAppClient() {
     
     // Ensure sessions directory exists
     ensureSessionsDirectory();
-
+    
+    // Load existing session from database
+    const savedSession = await loadSessionFromDB();
+    
     client = new Client({
-        authStrategy: new LocalAuth({
-            clientId: "whatsapp-bot-session",
-            dataPath: path.join(__dirname, 'sessions'),
-            backupSyncIntervalMs: 300000 // 5 minutes backup sync
-        }),
+        session: savedSession, // Use database session instead of LocalAuth
+        // Remove LocalAuth as we're using database-based session management
         puppeteer: {
             headless: true,
             args: [
@@ -118,16 +118,23 @@ function initializeWhatsAppClient() {
         isClientInitialized = true;
     });
 
-    client.on('authenticated', () => {
+    client.on('authenticated', (session) => {
         console.log('✅ WhatsApp authenticated');
         qrShown = false;
         reconnectAttempts = 0; // Reset on successful auth
+        
+        // Save session to database
+        saveSessionToDB(session);
     });
 
     client.on('auth_failure', (msg) => {
         console.error('❌ WhatsApp authentication failed:', msg);
         qrShown = false;
         isClientInitialized = false;
+        
+        // Clear corrupted session from database
+        console.log('🗑️ Clearing corrupted session from database...');
+        clearSessionFromDB();
         
         // Wait and retry authentication
         setTimeout(() => {
@@ -143,7 +150,13 @@ function initializeWhatsAppClient() {
         qrShown = false;
         isClientInitialized = false;
         
-        // Always attempt to reconnect, even on LOGOUT (could be forced logout)
+        // Clear session on logout or session expiry
+        if (reason === 'LOGOUT' || reason === 'NAVIGATION') {
+            console.log('🗑️ Clearing session due to logout/navigation');
+            clearSessionFromDB();
+        }
+        
+        // Always attempt to reconnect
         console.log('🔄 Attempting automatic reconnection...');
         
         // Destroy the current client instance
@@ -241,7 +254,7 @@ function initializeDatabase() {
             // Create tables with enhanced structure - using serialize for proper order
             db.serialize(() => {
                 let tablesCreated = 0;
-                const totalTables = 3;
+                const totalTables = 3; // Rules, authorized_numbers, schedules (whatsapp_session is created separately)
                 
                 // Rules table
                 db.run(`CREATE TABLE IF NOT EXISTS rules (
@@ -298,6 +311,20 @@ function initializeDatabase() {
                         console.log("✅ SQLite database initialized with all tables");
                         resolve(db);
                     }
+                });
+                
+                // WhatsApp session table
+                db.run(`CREATE TABLE IF NOT EXISTS whatsapp_session (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_data TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )`, (err) => {
+                    if (err) {
+                        console.error('❌ Error creating whatsapp_session table:', err);
+                        reject(err);
+                        return;
+                    }
+                    console.log('✅ WhatsApp session table created');
                 });
             });
         });
@@ -386,6 +413,86 @@ function removeAuthorizedNumberFromDb(number) {
             console.log(`🗑️ Authorized number removed from database: +${number}`);
             resolve(this.changes > 0);
         });
+    });
+}
+
+// --- WHATSAPP SESSION DATABASE FUNCTIONS ---
+// Save WhatsApp session to database
+function saveSessionToDB(session) {
+    if (!isDatabaseReady) {
+        console.log('⚠️ Database not ready, cannot save session');
+        return;
+    }
+    
+    const sessionStr = JSON.stringify(session);
+    
+    // Clear old sessions and insert new one
+    db.serialize(() => {
+        db.run('DELETE FROM whatsapp_session', (err) => {
+            if (err) {
+                console.error('❌ Error clearing old WhatsApp sessions:', err);
+                return;
+            }
+        });
+        
+        db.run('INSERT INTO whatsapp_session (session_data) VALUES (?)', [sessionStr], function(err) {
+            if (err) {
+                console.error('❌ Error saving WhatsApp session:', err);
+            } else {
+                console.log('💾 WhatsApp session saved to database');
+            }
+        });
+    });
+}
+
+// Load WhatsApp session from database
+function loadSessionFromDB() {
+    return new Promise((resolve) => {
+        if (!isDatabaseReady) {
+            console.log('⚠️ Database not ready, cannot load session');
+            resolve(null);
+            return;
+        }
+        
+        db.get('SELECT session_data FROM whatsapp_session ORDER BY id DESC LIMIT 1', [], (err, row) => {
+            if (err) {
+                console.error('❌ Error loading WhatsApp session:', err);
+                resolve(null);
+                return;
+            }
+            
+            if (row && row.session_data) {
+                try {
+                    const session = JSON.parse(row.session_data);
+                    console.log('✅ WhatsApp session loaded from database');
+                    resolve(session);
+                } catch (parseErr) {
+                    console.error('❌ Error parsing session data:', parseErr);
+                    // Clear corrupted session
+                    db.run('DELETE FROM whatsapp_session');
+                    resolve(null);
+                }
+            } else {
+                console.log('ℹ️ No WhatsApp session found in database');
+                resolve(null);
+            }
+        });
+    });
+}
+
+// Clear WhatsApp session from database
+function clearSessionFromDB() {
+    if (!isDatabaseReady) {
+        console.log('⚠️ Database not ready, cannot clear session');
+        return;
+    }
+    
+    db.run('DELETE FROM whatsapp_session', (err) => {
+        if (err) {
+            console.error('❌ Error clearing WhatsApp session:', err);
+        } else {
+            console.log('🗑️ WhatsApp session cleared from database');
+        }
     });
 }
 
