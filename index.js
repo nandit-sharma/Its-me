@@ -194,10 +194,43 @@ async function initializeWhatsAppClient() {
         }, 20000); // 20 seconds timeout
     });
     
-    // Add connection monitoring
-    client.on('message', () => {
+    // Add connection monitoring and WhatsApp Auto-Reply
+    client.on('message', async (msg) => {
         // Reset reconnect attempts on successful message handling
         reconnectAttempts = 0;
+        
+        // Skip if message is from status broadcast or if it's from us
+        if (msg.isStatus || msg.fromMe) return;
+        
+        // Check if the sender is authorized
+        if (!isAuthorizedNumber(msg.from)) {
+            console.log(`🚫 Message from unauthorized number: ${msg.from} - "${msg.body}"`);
+            return;
+        }
+        
+        const body = msg.body.toLowerCase();
+        console.log(`📥 WhatsApp message received: "${msg.body}" from authorized number ${msg.from}`);
+        
+        // Load rules from database and check for matches
+        loadRulesFromDB((rules) => {
+            for (const trigger in rules) {
+                if (body.includes(trigger.toLowerCase())) {
+                    console.log(`⏳ Waiting 5 seconds before replying to appear more human...`);
+                    
+                    // Add 5-second delay to make replies appear more natural
+                    setTimeout(async () => {
+                        try {
+                            await client.sendMessage(msg.from, rules[trigger]);
+                            console.log(`📤 WhatsApp auto-replied with rule "${trigger}" → "${rules[trigger]}" (after 5s delay)`);
+                        } catch (err) {
+                            console.error('⚠️ Error sending delayed WhatsApp reply:', err);
+                        }
+                    }, 5000); // 5 seconds = 5000 milliseconds
+                    
+                    break; // Reply only to the first matching rule
+                }
+            }
+        });
     });
     
     // Initialize the client with enhanced retry logic
@@ -885,41 +918,7 @@ bot.onText(/\/start/, (msg) => {
     bot.sendMessage(chatId, welcomeText, { parse_mode: 'Markdown' });
 });
 
-// --- WhatsApp Auto-Reply ---
-client.on('message', async (msg) => {
-    // Skip if message is from status broadcast or if it's from us
-    if (msg.isStatus || msg.fromMe) return;
-    
-    // Check if the sender is authorized
-    if (!isAuthorizedNumber(msg.from)) {
-        console.log(`🚫 Message from unauthorized number: ${msg.from} - "${msg.body}"`);
-        return;
-    }
-    
-    const body = msg.body.toLowerCase();
-    console.log(`📥 WhatsApp message received: "${msg.body}" from authorized number ${msg.from}`);
-    
-    // Load rules from database and check for matches
-    loadRulesFromDB((rules) => {
-        for (const trigger in rules) {
-            if (body.includes(trigger.toLowerCase())) {
-                console.log(`⏳ Waiting 5 seconds before replying to appear more human...`);
-                
-                // Add 5-second delay to make replies appear more natural
-                setTimeout(async () => {
-                    try {
-                        await client.sendMessage(msg.from, rules[trigger]);
-                        console.log(`📤 WhatsApp auto-replied with rule "${trigger}" → "${rules[trigger]}" (after 5s delay)`);
-                    } catch (err) {
-                        console.error('⚠️ Error sending delayed WhatsApp reply:', err);
-                    }
-                }, 5000); // 5 seconds = 5000 milliseconds
-                
-                break; // Reply only to the first matching rule
-            }
-        }
-    });
-});
+// --- WhatsApp Auto-Reply is now handled inside the client initialization ---
 
 
 // NEW WORk...
