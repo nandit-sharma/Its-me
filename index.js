@@ -116,15 +116,34 @@ async function initializeWhatsAppClient() {
         qrShown = false; // Reset for future sessions
         reconnectAttempts = 0; // Reset reconnect attempts on successful connection
         isClientInitialized = true;
+        
+        // Alternative: Save session data when client is ready
+        // This ensures we have a complete session
+        try {
+            const currentSession = client.options.session;
+            if (currentSession) {
+                console.log('💾 Saving session from ready event...');
+                saveSessionToDB(currentSession);
+            }
+        } catch (err) {
+            console.log('⚠️ Could not access session from ready event:', err.message);
+        }
     });
 
     client.on('authenticated', (session) => {
         console.log('✅ WhatsApp authenticated');
+        console.log('🔍 Session object type:', typeof session);
+        console.log('🔍 Session keys:', session ? Object.keys(session) : 'null');
+        
         qrShown = false;
         reconnectAttempts = 0; // Reset on successful auth
         
-        // Save session to database
-        saveSessionToDB(session);
+        // Save session to database with validation
+        if (session) {
+            saveSessionToDB(session);
+        } else {
+            console.log('⚠️ No session data received in authenticated event');
+        }
     });
 
     client.on('auth_failure', (msg) => {
@@ -349,10 +368,10 @@ function initializeDatabase() {
                     }
                 });
                 
-                // WhatsApp session table
+                // WhatsApp session table - allow NULL session_data temporarily
                 db.run(`CREATE TABLE IF NOT EXISTS whatsapp_session (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_data TEXT NOT NULL,
+                    session_data TEXT,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 )`, (err) => {
                     if (err) {
@@ -455,25 +474,45 @@ function removeAuthorizedNumberFromDb(number) {
 // --- WHATSAPP SESSION DATABASE FUNCTIONS ---
 // Save WhatsApp session to database
 function saveSessionToDB(session) {
-    const sessionStr = JSON.stringify(session);
+    // Validate session data before saving
+    if (!session || typeof session !== 'object') {
+        console.log('⚠️ Invalid session data, cannot save to database');
+        return;
+    }
     
-    // Clear old sessions and insert new one
-    db.serialize(() => {
-        db.run('DELETE FROM whatsapp_session', (err) => {
-            if (err) {
-                console.error('❌ Error clearing old WhatsApp sessions:', err);
-                return;
-            }
-        });
+    try {
+        const sessionStr = JSON.stringify(session);
         
-        db.run('INSERT INTO whatsapp_session (session_data) VALUES (?)', [sessionStr], function(err) {
-            if (err) {
-                console.error('❌ Error saving WhatsApp session:', err);
-            } else {
-                console.log('💾 WhatsApp session saved to database');
-            }
+        // Additional validation - ensure we have actual session data
+        if (!sessionStr || sessionStr === '{}' || sessionStr === 'null') {
+            console.log('⚠️ Empty session data, skipping save');
+            return;
+        }
+        
+        console.log('💾 Saving WhatsApp session to database...');
+        
+        // Clear old sessions and insert new one
+        db.serialize(() => {
+            db.run('DELETE FROM whatsapp_session', (err) => {
+                if (err) {
+                    console.error('❌ Error clearing old WhatsApp sessions:', err);
+                    return;
+                }
+            });
+            
+            db.run('INSERT INTO whatsapp_session (session_data) VALUES (?)', [sessionStr], function(err) {
+                if (err) {
+                    console.error('❌ Error saving WhatsApp session:', err);
+                    console.error('Session data length:', sessionStr.length);
+                } else {
+                    console.log('✅ WhatsApp session successfully saved to database');
+                    console.log('💾 Session data size:', sessionStr.length, 'characters');
+                }
+            });
         });
-    });
+    } catch (error) {
+        console.error('❌ Error processing session for database save:', error);
+    }
 }
 
 // Load WhatsApp session from database
